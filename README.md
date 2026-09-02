@@ -5,20 +5,21 @@
 - Cloudflare Workers: https://sales-mail-studio-production.sales-mail-studio.workers.dev
 - GitHub: https://github.com/koukokuhiroshi2025-netizen/SalesMailStudio
 - 初回公開は誤送信防止のため `MAIL_PROVIDER=mock` です。Garoon Secretsの登録と接続確認後に `garoon` へ切り替えてください。
+- ログインフォームやユーザー登録はありません。Cloudflare Secretの`ACCESS_TOKEN`を含む管理者専用URLから自動認証します。
 
-Excel / CSVの営業リストを取り込み、顧客ごとのテキストメールを作成・確認し、Garoonから個別送信または下書き保存する営業支援Webアプリです。Cloudflare Workers、D1、Queues、Static Assetsを使い、外部の有料メール配信サービスを必須にしないMVPとして構成しています。
+Excel / CSVの送信リストを取り込み、件名と本文を作成し、Garoonから宛先ごとに個別送信するシンプルな一括メール送信Webアプリです。Cloudflare Workers、D1、Queues、Static Assetsを使い、外部の有料メール配信サービスを必須にしないMVPとして構成しています。
 
 > 重要: 本アプリは、正当な取引関係や適切な同意に基づく営業活動のためのものです。購入リストへの無差別配信、配信停止先への送信、フィッシング、なりすまし、違法な勧誘には使用しないでください。
 
 ## 実装済み機能
 
-- 日本語のレスポンシブ管理画面（PC固定サイドバー／スマホメニュー）
-- ダッシュボード、営業リスト、メール作成・配信、テンプレート、フォロー、案件、履歴、除外リスト、メールアカウント、設定
+- リスト取込・メール作成・確認・一括送信を1画面に集約した日本語レスポンシブUI
+- ログイン入力なし。Secret付き管理者専用URLでHttpOnlyセッションを自動発行
 - `.xlsx` / `.xls` / `.csv` のブラウザ内解析（最大10MB、UTF-8 / Shift_JIS CSV）
 - Excel列とアプリ項目の自動・手動マッピング
 - 必須項目、メール形式、メール重複、同一企業、配信停止、過去送信、数式インジェクションの検査
 - 顧客13項目の差し込み、未展開変数の検知、顧客ごとのプレビュー、ランダム3件確認
-- 100件を初期上限とする一括処理、確認件数の一致チェック、5/10/30/60秒の送信間隔
+- 500件を上限とする一括処理、確認件数の一致チェック、5/10/30/60秒の送信間隔
 - モック送信、自分宛テスト、Garoon `MailSendMails`、`MailSaveDraftMails`
 - Cloudflare Queueによる1宛先ずつの個別非同期処理
 - 送信・下書き・失敗ログ、キャンペーン進捗、フォロー期限、簡易案件管理
@@ -115,10 +116,11 @@ npm run dev
 
 ブラウザで `http://localhost:5173` を開きます。
 
-ローカルデモ認証:
+ローカル管理者URL:
 
-- メール: `sales@example.com`
-- パスワード: `demo-pass`
+- `http://localhost:5173/?access=local-access-token-change-me-32chars`
+
+ログインフォームやユーザー登録はありません。URLの`access`値を確認後、HttpOnlyセッションを発行してアドレス欄からトークンを除去します。
 
 ローカルでは`MAIL_PROVIDER=mock`です。テスト送信や一括配信を実行しても外部へメールを送りません。
 
@@ -173,7 +175,7 @@ npm run cf-typegen
 
 ```powershell
 npx wrangler secret put SESSION_SECRET --env production
-npx wrangler secret put APP_PASSWORD --env production
+npx wrangler secret put ACCESS_TOKEN --env production
 npx wrangler secret put DEMO_USER_EMAIL --env production
 npx wrangler secret put GAROON_BASE_URL --env production
 npx wrangler secret put GAROON_USERNAME --env production
@@ -188,7 +190,7 @@ npx wrangler secret put GAROON_BASIC_USERNAME --env production
 npx wrangler secret put GAROON_BASIC_PASSWORD --env production
 ```
 
-`SESSION_SECRET`は最低32文字のランダム値、`APP_PASSWORD`は推測困難な値にしてください。`DEMO_USER_EMAIL`は実運用管理者のログインメールへ変更します。
+`SESSION_SECRET`と`ACCESS_TOKEN`はそれぞれ最低32文字の独立したランダム値にしてください。`ACCESS_TOKEN`はGitやREADMEへ記載せず、管理者専用URLとして安全に共有します。`DEMO_USER_EMAIL`は運用管理者のメールへ変更します。
 
 ### 6. 本番DBへmigration
 
@@ -296,11 +298,11 @@ npm run deploy
 
 同期フォルダー上のロック問題が考えられます。`SALES_MAIL_STUDIO_STATE_PATH`をローカルディスクへ設定し、migrationとdevを同じシェルで再実行してください。
 
-### ログインできない
+### 管理者専用URLから開けない
 
-- ローカル: `sales@example.com` / `demo-pass`
-- 本番: `DEMO_USER_EMAIL`と`APP_PASSWORD`のproduction Secretを再確認
-- Secret変更後は再デプロイし、古いCookieを削除して再ログイン
+- URLに`?access=<ACCESS_TOKEN>`が含まれているか確認
+- 本番の`ACCESS_TOKEN` production Secretを再確認
+- トークン変更後は新しい管理者専用URLから開き直す
 
 ### D1テーブルがない
 

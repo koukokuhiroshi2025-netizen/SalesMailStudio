@@ -10,7 +10,7 @@ import type {
   Unsubscribe,
 } from "../shared/types";
 import {
-  authenticateCredentials,
+  authenticateAccessToken,
   clearSessionCookie,
   createSessionCookie,
   getSession,
@@ -21,12 +21,12 @@ import { createMailProvider } from "./providers";
 import { enforceMutationRateLimit } from "./rate-limit";
 import type { GaroonCredentials, OutgoingMail } from "./providers/types";
 import {
+  accessTokenSchema,
   bulkStatusSchema,
   campaignSchema,
   contactInputSchema,
   garoonTestSchema,
   importSchema,
-  loginSchema,
   mailAccountMetadataSchema,
   settingsSchema,
   templateInputSchema,
@@ -333,12 +333,12 @@ async function routeApi(request: Request, env: Env): Promise<Response> {
   if (url.pathname === "/api/health" && request.method === "GET") {
     return json({ ok: true, environment: env.ENVIRONMENT, provider: env.MAIL_PROVIDER });
   }
-  if (url.pathname === "/api/auth/login" && request.method === "POST") {
+  if (url.pathname === "/api/auth/access" && request.method === "POST") {
     assertSameOrigin(request);
-    const parsed = loginSchema.safeParse(await readJson(request, 10_000));
-    if (!parsed.success) return apiError("メールアドレスとパスワードを確認してください", 422);
-    const user = await authenticateCredentials(parsed.data.email, parsed.data.password, env);
-    if (!user) return apiError("メールアドレスまたはパスワードが違います", 401);
+    const parsed = accessTokenSchema.safeParse(await readJson(request, 10_000));
+    if (!parsed.success) return apiError("管理者専用URLが無効です", 422);
+    const user = await authenticateAccessToken(parsed.data.token, env);
+    if (!user) return apiError("管理者専用URLが無効です", 401);
     await ensureUser(env, user);
     return json(
       { user: { id: user.id, email: user.email, displayName: user.displayName } },
@@ -351,7 +351,7 @@ async function routeApi(request: Request, env: Env): Promise<Response> {
   }
 
   const user = await getSession(request, env);
-  if (!user) return apiError("ログインが必要です", 401);
+  if (!user) return apiError("管理者専用URLが必要です", 401);
   if (!["GET", "HEAD"].includes(request.method)) assertSameOrigin(request);
 
   if (url.pathname === "/api/bootstrap" && request.method === "GET") {

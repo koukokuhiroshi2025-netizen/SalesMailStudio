@@ -49,7 +49,30 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    let active = true;
+    const initialize = async () => {
+      const url = new URL(window.location.href);
+      const accessToken = url.searchParams.get("access");
+      if (accessToken) {
+        url.searchParams.delete("access");
+        window.history.replaceState({}, "", url.pathname + url.search + url.hash);
+        try {
+          await postJson("/api/auth/access", { token: accessToken });
+        } catch (cause) {
+          if (!active) return;
+          setAuthenticated(false);
+          setData(null);
+          setError(cause instanceof Error ? cause.message : "管理者専用URLが無効です");
+          setLoading(false);
+          return;
+        }
+      }
+      if (active) await refresh();
+    };
+    void initialize();
+    return () => { active = false; };
+  }, [refresh]);
 
   const login = useCallback(async (email: string, password: string) => {
     await postJson("/api/auth/login", { email, password });

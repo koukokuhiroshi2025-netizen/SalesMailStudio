@@ -8,8 +8,8 @@ export interface SessionUser {
 interface AuthEnv {
   ENVIRONMENT: string;
   SESSION_SECRET?: string;
-  APP_PASSWORD?: string;
   DEMO_USER_EMAIL?: string;
+  ACCESS_TOKEN?: string;
 }
 
 const COOKIE_NAME = "sms_session";
@@ -31,6 +31,15 @@ function getSecret(env: AuthEnv) {
   if (env.SESSION_SECRET) return env.SESSION_SECRET;
   if (env.ENVIRONMENT !== "production") return "local-development-session-secret-change-me";
   throw new Error("SESSION_SECRETが設定されていません");
+}
+
+function createUser(email: string, lifetimeSeconds: number): SessionUser {
+  return {
+    id: "demo-user",
+    email,
+    displayName: "メール送信管理者",
+    exp: Math.floor(Date.now() / 1000) + lifetimeSeconds,
+  };
 }
 
 async function importHmacKey(secret: string) {
@@ -62,7 +71,7 @@ async function hash(value: string) {
   return new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(value)));
 }
 
-async function constantTimePasswordMatch(actual: string, expected: string) {
+async function constantTimeMatch(actual: string, expected: string) {
   const [left, right] = await Promise.all([hash(actual), hash(expected)]);
   let different = left.byteLength ^ right.byteLength;
   for (let index = 0; index < Math.max(left.byteLength, right.byteLength); index += 1) {
@@ -73,40 +82,29 @@ async function constantTimePasswordMatch(actual: string, expected: string) {
 
 function readCookie(request: Request, name: string) {
   const cookie = request.headers.get("cookie") ?? "";
-  return cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`))?.slice(name.length + 1);
+  return cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith(name + "="))?.slice(name.length + 1);
 }
 
-export async function authenticateCredentials(
-  email: string,
-  password: string,
-  env: AuthEnv,
-): Promise<SessionUser | null> {
-  const expectedEmail = env.DEMO_USER_EMAIL ?? "sales@example.com";
-  const expectedPassword = env.APP_PASSWORD ?? (env.ENVIRONMENT === "production" ? "" : "demo-pass");
-  if (!expectedPassword) throw new Error("APP_PASSWORDが設定されていません");
-  const [emailMatches, passwordMatches] = await Promise.all([
-    constantTimePasswordMatch(email.trim().toLowerCase(), expectedEmail.trim().toLowerCase()),
-    constantTimePasswordMatch(password, expectedPassword),
-  ]);
-  if (!emailMatches || !passwordMatches) return null;
-  return {
-    id: "demo-user",
-    email: expectedEmail,
-    displayName: "営業企画チーム",
-    exp: Math.floor(Date.now() / 1000) + 60 * 60 * 12,
-  };
+export async function authenticateAccessToken(token: string, env: AuthEnv): Promise<SessionUser | null> {
+  const expectedToken = env.ACCESS_TOKEN ?? (
+    env.ENVIRONMENT === "production" ? "" : "local-access-token-change-me-32chars"
+  );
+  if (!expectedToken) throw new Error("ACCESS_TOKENが設定されていません");
+  if (!(await constantTimeMatch(token, expectedToken))) return null;
+  return createUser(env.DEMO_USER_EMAIL ?? "sales@example.com", 60 * 60 * 24 * 30);
 }
 
 export async function createSessionCookie(user: SessionUser, env: AuthEnv) {
   const payload = bytesToBase64Url(encoder.encode(JSON.stringify(user)));
   const signature = await sign(payload, getSecret(env));
   const secure = env.ENVIRONMENT === "production" ? "; Secure" : "";
-  return `${COOKIE_NAME}=${payload}.${signature}; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200${secure}`;
+  const maxAge = Math.max(0, Math.min(60 * 60 * 24 * 30, user.exp - Math.floor(Date.now() / 1000)));
+  return COOKIE_NAME + "=" + payload + "." + signature + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=" + maxAge + secure;
 }
 
 export function clearSessionCookie(env: AuthEnv) {
   const secure = env.ENVIRONMENT === "production" ? "; Secure" : "";
-  return `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure}`;
+  return COOKIE_NAME + "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0" + secure;
 }
 
 export async function getSession(request: Request, env: AuthEnv): Promise<SessionUser | null> {

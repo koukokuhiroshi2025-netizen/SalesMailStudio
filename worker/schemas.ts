@@ -3,10 +3,10 @@ import { z } from "zod";
 const optionalText = (max = 500) => z.string().trim().max(max).optional().default("");
 const email = z.string().trim().toLowerCase().email().max(254);
 
-export const loginSchema = z.object({
-  email,
-  password: z.string().min(1).max(256),
+export const accessTokenSchema = z.object({
+  token: z.string().min(32).max(512),
 }).strict();
+
 
 export const contactInputSchema = z.object({
   company: z.string().trim().min(1).max(200),
@@ -75,7 +75,7 @@ export const testMailSchema = z.object({
 export const campaignSchema = z.object({
   name: z.string().trim().min(1).max(200),
   templateId: z.string().max(100).optional(),
-  contactIds: z.array(z.string().min(1).max(100)).min(1).max(100),
+  contactIds: z.array(z.string().min(1).max(100)).min(1).max(500),
   subject: z.string().trim().min(1).max(500),
   body: z.string().min(1).max(50_000),
   cc: z.string().max(1000).optional().default(""),
