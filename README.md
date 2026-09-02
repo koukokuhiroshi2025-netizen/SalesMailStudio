@@ -1,5 +1,11 @@
 # Sales Mail Studio
 
+## 公開環境
+
+- Cloudflare Workers: https://sales-mail-studio-production.sales-mail-studio.workers.dev
+- GitHub: https://github.com/koukokuhiroshi2025-netizen/SalesMailStudio
+- 初回公開は誤送信防止のため `MAIL_PROVIDER=mock` です。Garoon Secretsの登録と接続確認後に `garoon` へ切り替えてください。
+
 Excel / CSVの営業リストを取り込み、顧客ごとのテキストメールを作成・確認し、Garoonから個別送信または下書き保存する営業支援Webアプリです。Cloudflare Workers、D1、Queues、Static Assetsを使い、外部の有料メール配信サービスを必須にしないMVPとして構成しています。
 
 > 重要: 本アプリは、正当な取引関係や適切な同意に基づく営業活動のためのものです。購入リストへの無差別配信、配信停止先への送信、フィッシング、なりすまし、違法な勧誘には使用しないでください。
