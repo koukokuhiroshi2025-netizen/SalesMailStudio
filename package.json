@@ -1,0 +1,43 @@
+{
+  "name": "sales-mail-studio",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "prebuild": "wrangler types",
+    "build": "tsc -b && vite build",
+    "build:production": "cross-env CLOUDFLARE_ENV=production npm run build",
+    "preview": "npm run build && vite preview",
+    "deploy": "npm run build:production && wrangler deploy",
+    "deploy:dry": "npm run build:production && wrangler deploy --dry-run",
+    "cf-typegen": "wrangler types",
+    "db:migrate:local": "node scripts/run-local-migration.mjs",
+    "db:migrate:remote": "wrangler d1 migrations apply sales-mail-studio-db --remote",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.54.2",
+    "@cloudflare/workers-types": "^5.20260901.1",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^26.4.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "@vitejs/plugin-react": "^6.1.1",
+    "cross-env": "^10.1.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.127.1"
+  },
+  "dependencies": {
+    "lucide-react": "^1.38.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-router-dom": "^7.18.3",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
+    "zod": "^4.5.4"
+  }
+}

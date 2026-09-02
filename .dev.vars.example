@@ -1,0 +1,10 @@
+# Local-only example. Replace every value before using a real Garoon tenant.
+SESSION_SECRET=replace-with-at-least-32-random-characters
+APP_PASSWORD=demo-pass
+DEMO_USER_EMAIL=sales@example.com
+GAROON_BASE_URL=
+GAROON_USERNAME=
+GAROON_PASSWORD=
+GAROON_ACCOUNT_ID=
+GAROON_BASIC_USERNAME=
+GAROON_BASIC_PASSWORD=
