@@ -17,16 +17,13 @@ import {
   type SessionUser,
 } from "./auth";
 import { apiError, assertSameOrigin, json, readJson } from "./http";
-import { createMailProvider } from "./providers";
+import { createMailProvider, getProviderStatus } from "./providers";
 import { enforceMutationRateLimit } from "./rate-limit";
 import type { GaroonCredentials, OutgoingMail } from "./providers/types";
 import {
   accessTokenSchema,
-  bulkStatusSchema,
   campaignSchema,
-  contactInputSchema,
   garoonTestSchema,
-  importSchema,
   mailAccountMetadataSchema,
   settingsSchema,
   templateInputSchema,
@@ -37,7 +34,6 @@ import {
 interface MailQueueJob {
   logId: string;
   campaignId: string;
-  contactId: string;
   mode: "send" | "draft";
   message: OutgoingMail;
 }
@@ -108,10 +104,11 @@ async function bootstrap(env: Env, user: SessionUser) {
   const startOfMonth = new Date();
   startOfMonth.setUTCDate(1);
   startOfMonth.setUTCHours(0, 0, 0, 0);
+  const providerStatus = getProviderStatus(env);
 
   return {
     user: { id: user.id, email: user.email, displayName: user.displayName },
-    contacts,
+    contacts: [],
     templates,
     logs,
     campaigns,
@@ -120,7 +117,10 @@ async function bootstrap(env: Env, user: SessionUser) {
     unsubscribes,
     mailAccounts,
     settings,
-    provider: env.MAIL_PROVIDER,
+    provider: providerStatus.provider,
+    providerReady: providerStatus.ready,
+    providerLabel: providerStatus.label,
+    missingProviderConfig: providerStatus.missing,
     stats: {
       contacts: contacts.length,
       sentThisMonth: logs.filter((log) => log.status === "sent" && new Date(log.created_at) >= startOfMonth).length,
@@ -139,74 +139,46 @@ async function bootstrap(env: Env, user: SessionUser) {
   };
 }
 
-async function importContacts(request: Request, env: Env, user: SessionUser) {
-  const parsed = importSchema.safeParse(await readJson(request));
-  if (!parsed.success) return apiError("取込データを確認してください", 422, parsed.error.issues);
-  const [existingRows, blockedRows] = await Promise.all([
-    all<{ email: string }>(env.DB.prepare("SELECT email FROM contacts WHERE user_id = ?").bind(user.id)),
-    all<{ email: string }>(env.DB.prepare("SELECT email FROM unsubscribes WHERE user_id = ?").bind(user.id)),
-  ]);
-  const existing = new Set(existingRows.map((row) => row.email.toLowerCase()));
-  const blocked = new Set(blockedRows.map((row) => row.email.toLowerCase()));
-  const seen = new Set<string>();
-  const statements: D1PreparedStatement[] = [];
-  const skipped: Array<{ email: string; reason: string }> = [];
-
-  for (const contact of parsed.data.contacts) {
-    if (existing.has(contact.email) || seen.has(contact.email)) {
-      skipped.push({ email: contact.email, reason: "重複" });
-      continue;
-    }
-    if (blocked.has(contact.email)) {
-      skipped.push({ email: contact.email, reason: "配信停止" });
-      continue;
-    }
-    seen.add(contact.email);
-    statements.push(env.DB.prepare(
-      `INSERT INTO contacts (
-        id, user_id, company, department, position, name, email, phone, industry, area,
-        sales_rep, rank, status, issue, service, note
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).bind(
-      crypto.randomUUID(), user.id, contact.company, nullable(contact.department), nullable(contact.position),
-      contact.name, contact.email, nullable(contact.phone), nullable(contact.industry), nullable(contact.area),
-      nullable(contact.sales_rep), contact.rank, contact.status || "未アプローチ", nullable(contact.issue),
-      nullable(contact.service), nullable(contact.note),
-    ));
-  }
-  for (const group of chunks(statements, 50)) await env.DB.batch(group);
-  return json({ imported: statements.length, skipped, total: parsed.data.contacts.length }, { status: 201 });
-}
-
 async function createCampaign(request: Request, env: Env, user: SessionUser) {
+  const providerStatus = getProviderStatus(env);
+  if (!providerStatus.ready) {
+    return apiError("Garoon本番送信の接続情報が未設定です", 503, providerStatus.missing);
+  }
   const parsed = campaignSchema.safeParse(await readJson(request));
   if (!parsed.success) return apiError("配信内容を確認してください", 422, parsed.error.issues);
   const input = parsed.data;
-  const placeholders = input.contactIds.map(() => "?").join(",");
-  const contacts = await all<Contact>(env.DB.prepare(
-    `SELECT * FROM contacts WHERE user_id = ? AND id IN (${placeholders})`,
-  ).bind(user.id, ...input.contactIds));
   const blockedRows = await all<{ email: string }>(
     env.DB.prepare("SELECT email FROM unsubscribes WHERE user_id = ?").bind(user.id),
   );
   const blocked = new Set(blockedRows.map((row) => row.email.toLowerCase()));
-  const eligible: Array<{ contact: Contact; subject: string; body: string }> = [];
-  const skipped: Array<{ contactId: string; reason: string }> = [];
+  const seen = new Set<string>();
+  const eligible: Array<{
+    recipient: (typeof input.recipients)[number];
+    subject: string;
+    body: string;
+  }> = [];
+  const skipped: Array<{ email: string; reason: string }> = [];
 
-  for (const contact of contacts) {
-    if (blocked.has(contact.email.toLowerCase())) {
-      skipped.push({ contactId: contact.id, reason: "配信停止リスト" });
+  for (const recipient of input.recipients) {
+    const normalizedEmail = recipient.email.toLowerCase();
+    if (seen.has(normalizedEmail)) {
+      skipped.push({ email: recipient.email, reason: "ファイル内重複" });
       continue;
     }
-    const data = contactToMergeData(contact);
+    seen.add(normalizedEmail);
+    if (blocked.has(normalizedEmail)) {
+      skipped.push({ email: recipient.email, reason: "配信停止リスト" });
+      continue;
+    }
+    const data = contactToMergeData(recipient);
     const subject = renderTemplate(input.subject, data);
     const body = renderTemplate(input.body, data);
     const unresolved = [...new Set([...subject.unresolved, ...body.unresolved])];
     if (unresolved.length) {
-      skipped.push({ contactId: contact.id, reason: `未展開: ${unresolved.join(", ")}` });
+      skipped.push({ email: recipient.email, reason: `未展開: ${unresolved.join(", ")}` });
       continue;
     }
-    eligible.push({ contact, subject: subject.content, body: body.content });
+    eligible.push({ recipient, subject: subject.content, body: body.content });
   }
 
   if (!eligible.length) return apiError("送信可能な対象がありません", 422, skipped);
@@ -230,49 +202,73 @@ async function createCampaign(request: Request, env: Env, user: SessionUser) {
     input.mode, eligible.length, now, now,
   ).run();
 
-  const jobs: Array<{ job: MailQueueJob; delaySeconds: number }> = [];
+  const jobs: Array<{ job: MailQueueJob; delaySeconds: number; encodedBytes: number }> = [];
   const insertStatements: D1PreparedStatement[] = [];
-  eligible.forEach(({ contact, subject, body }, index) => {
+  eligible.forEach(({ recipient, subject, body }, index) => {
     const logId = crypto.randomUUID();
     insertStatements.push(
       env.DB.prepare(
-        "INSERT INTO campaign_contacts (campaign_id, contact_id, status) VALUES (?, ?, 'pending')",
-      ).bind(campaignId, contact.id),
-      env.DB.prepare(
         `INSERT INTO mail_logs (
           id, user_id, campaign_id, contact_id, provider, to_address, cc, bcc, subject, body, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+        ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 'pending')`,
       ).bind(
-        logId, user.id, campaignId, contact.id, env.MAIL_PROVIDER, contact.email,
+        logId, user.id, campaignId, env.MAIL_PROVIDER, recipient.email,
         nullable(input.cc), nullable(input.bcc), subject, body,
       ),
     );
+    const job: MailQueueJob = {
+      logId,
+      campaignId,
+      mode: input.mode,
+      message: { to: recipient.email, cc: input.cc, bcc: input.bcc, subject, body },
+    };
     jobs.push({
-      job: {
-        logId,
-        campaignId,
-        contactId: contact.id,
-        mode: input.mode,
-        message: { to: contact.email, cc: input.cc, bcc: input.bcc, subject, body },
-      },
-      delaySeconds: index * input.intervalSeconds,
+      job,
+      delaySeconds: Math.min(index * input.intervalSeconds, 86_400),
+      encodedBytes: new TextEncoder().encode(JSON.stringify(job)).byteLength,
     });
   });
   for (const group of chunks(insertStatements, 50)) await env.DB.batch(group);
 
+  const queueGroups: Array<typeof jobs> = [];
+  let currentGroup: typeof jobs = [];
+  let currentBytes = 0;
+  for (const item of jobs) {
+    if (item.encodedBytes > 120_000) {
+      await env.DB.prepare(
+        "UPDATE mail_logs SET status = 'failed', error_message = ? WHERE id = ?",
+      ).bind("メール本文がQueueの上限を超えています", item.job.logId).run();
+      continue;
+    }
+    if (currentGroup.length >= 100 || currentBytes + item.encodedBytes > 240_000) {
+      queueGroups.push(currentGroup);
+      currentGroup = [];
+      currentBytes = 0;
+    }
+    currentGroup.push(item);
+    currentBytes += item.encodedBytes;
+  }
+  if (currentGroup.length) queueGroups.push(currentGroup);
+
   let queued = 0;
-  for (const { job, delaySeconds } of jobs) {
+  for (const group of queueGroups) {
     try {
-      await env.MAIL_QUEUE.send(job, { delaySeconds: Math.min(delaySeconds, 43_200) });
-      queued += 1;
+      await env.MAIL_QUEUE.sendBatch(group.map(({ job, delaySeconds }) => ({
+        body: job,
+        delaySeconds,
+      })));
+      queued += group.length;
     } catch (error) {
       const message = error instanceof Error ? error.message : "キュー登録に失敗しました";
-      await env.DB.batch([
-        env.DB.prepare("UPDATE mail_logs SET status = 'failed', error_message = ? WHERE id = ?").bind(message, job.logId),
-        env.DB.prepare("UPDATE campaign_contacts SET status = 'failed' WHERE campaign_id = ? AND contact_id = ?").bind(campaignId, job.contactId),
-      ]);
+      for (const statementGroup of chunks(group.map(({ job }) =>
+        env.DB.prepare("UPDATE mail_logs SET status = 'failed', error_message = ? WHERE id = ?")
+          .bind(message, job.logId)
+      ), 50)) {
+        await env.DB.batch(statementGroup);
+      }
     }
   }
+  await refreshCampaign(env, campaignId);
   return json({ campaignId, queued, skipped, targetCount: eligible.length }, { status: 202 });
 }
 
@@ -297,25 +293,24 @@ async function refreshCampaign(env: Env, campaignId: string) {
 }
 
 async function processMailJob(job: MailQueueJob, env: Env) {
-  await env.DB.prepare("UPDATE mail_logs SET status = 'processing' WHERE id = ? AND status = 'pending'").bind(job.logId).run();
+  await env.DB.prepare(
+    "UPDATE mail_logs SET status = 'processing' WHERE id = ? AND status = 'pending'",
+  ).bind(job.logId).run();
+  const providerStatus = getProviderStatus(env);
+  if (!providerStatus.ready) throw new Error("Garoon本番送信の接続情報が未設定です");
   const provider = createMailProvider(env);
   const result = job.mode === "draft" && provider.saveDraft
     ? await provider.saveDraft(job.message)
     : await provider.sendMail(job.message);
   const status = result.success ? (job.mode === "draft" ? "drafted" : "sent") : "failed";
-  await env.DB.batch([
-    env.DB.prepare(
-      "UPDATE mail_logs SET status = ?, sent_at = ?, error_message = ? WHERE id = ?",
-    ).bind(status, result.success ? new Date().toISOString() : null, result.error ?? null, job.logId),
-    env.DB.prepare(
-      "UPDATE campaign_contacts SET status = ? WHERE campaign_id = ? AND contact_id = ?",
-    ).bind(status, job.campaignId, job.contactId),
-    ...(result.success && job.mode === "send"
-      ? [env.DB.prepare(
-        "UPDATE contacts SET status = '送信済', last_contact_at = ?, updated_at = datetime('now') WHERE id = ?",
-      ).bind(new Date().toISOString(), job.contactId)]
-      : []),
-  ]);
+  await env.DB.prepare(
+    "UPDATE mail_logs SET status = ?, sent_at = ?, error_message = ? WHERE id = ?",
+  ).bind(
+    status,
+    result.success ? new Date().toISOString() : null,
+    result.error ?? null,
+    job.logId,
+  ).run();
   await refreshCampaign(env, job.campaignId);
   console.log(JSON.stringify({
     event: "mail_job_completed",
@@ -331,14 +326,20 @@ async function routeApi(request: Request, env: Env): Promise<Response> {
   const rateLimited = await enforceMutationRateLimit(request, env);
   if (rateLimited) return rateLimited;
   if (url.pathname === "/api/health" && request.method === "GET") {
-    return json({ ok: true, environment: env.ENVIRONMENT, provider: env.MAIL_PROVIDER });
+    const providerStatus = getProviderStatus(env);
+    return json({
+      ok: true,
+      environment: env.ENVIRONMENT,
+      provider: providerStatus.provider,
+      providerReady: providerStatus.ready,
+    });
   }
   if (url.pathname === "/api/auth/access" && request.method === "POST") {
     assertSameOrigin(request);
     const parsed = accessTokenSchema.safeParse(await readJson(request, 10_000));
-    if (!parsed.success) return apiError("管理者専用URLが無効です", 422);
+    if (!parsed.success) return apiError("利用者専用URLが無効です", 422);
     const user = await authenticateAccessToken(parsed.data.token, env);
-    if (!user) return apiError("管理者専用URLが無効です", 401);
+    if (!user) return apiError("利用者専用URLが無効です", 401);
     await ensureUser(env, user);
     return json(
       { user: { id: user.id, email: user.email, displayName: user.displayName } },
@@ -351,50 +352,11 @@ async function routeApi(request: Request, env: Env): Promise<Response> {
   }
 
   const user = await getSession(request, env);
-  if (!user) return apiError("管理者専用URLが必要です", 401);
+  if (!user) return apiError("利用者専用URLが必要です", 401);
   if (!["GET", "HEAD"].includes(request.method)) assertSameOrigin(request);
 
   if (url.pathname === "/api/bootstrap" && request.method === "GET") {
     return json(await bootstrap(env, user));
-  }
-  if (url.pathname === "/api/contacts/import" && request.method === "POST") {
-    return importContacts(request, env, user);
-  }
-  if (url.pathname === "/api/contacts" && request.method === "POST") {
-    const parsed = contactInputSchema.safeParse(await readJson(request));
-    if (!parsed.success) return apiError("顧客情報を確認してください", 422, parsed.error.issues);
-    const contact = parsed.data;
-    const id = crypto.randomUUID();
-    try {
-      await env.DB.prepare(
-        `INSERT INTO contacts (
-          id, user_id, company, department, position, name, email, phone, industry, area,
-          sales_rep, rank, status, issue, service, note
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).bind(
-        id, user.id, contact.company, nullable(contact.department), nullable(contact.position), contact.name,
-        contact.email, nullable(contact.phone), nullable(contact.industry), nullable(contact.area),
-        nullable(contact.sales_rep), contact.rank, contact.status || "未アプローチ", nullable(contact.issue),
-        nullable(contact.service), nullable(contact.note),
-      ).run();
-      return json({ id }, { status: 201 });
-    } catch {
-      return apiError("同じメールアドレスの顧客が登録されています", 409);
-    }
-  }
-  if (url.pathname === "/api/contacts/bulk-status" && request.method === "PATCH") {
-    const parsed = bulkStatusSchema.safeParse(await readJson(request));
-    if (!parsed.success) return apiError("ステータス変更内容を確認してください", 422);
-    const statements = parsed.data.ids.map((id) => env.DB.prepare(
-      "UPDATE contacts SET status = ?, updated_at = datetime('now') WHERE id = ? AND user_id = ?",
-    ).bind(parsed.data.status, id, user.id));
-    for (const group of chunks(statements, 50)) await env.DB.batch(group);
-    return json({ updated: statements.length });
-  }
-  const contactMatch = url.pathname.match(/^\/api\/contacts\/([^/]+)$/);
-  if (contactMatch && request.method === "DELETE") {
-    await env.DB.prepare("DELETE FROM contacts WHERE id = ? AND user_id = ?").bind(contactMatch[1], user.id).run();
-    return json({ ok: true });
   }
   if (url.pathname === "/api/templates" && request.method === "POST") {
     const parsed = templateInputSchema.safeParse(await readJson(request));
@@ -470,6 +432,10 @@ async function routeApi(request: Request, env: Env): Promise<Response> {
   if (url.pathname === "/api/mail/test-send" && request.method === "POST") {
     const parsed = testMailSchema.safeParse(await readJson(request));
     if (!parsed.success) return apiError("テストメールの内容を確認してください", 422);
+    const providerStatus = getProviderStatus(env);
+    if (!providerStatus.ready) {
+      return apiError("Garoon本番送信の接続情報が未設定です", 503, providerStatus.missing);
+    }
     const provider = createMailProvider(env);
     const result = await provider.sendMail({
       to: parsed.data.to,

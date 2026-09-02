@@ -5,13 +5,15 @@ import {
   MailCheck,
   Search,
   Send,
+  Trash2,
   Users,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { MERGE_FIELDS, contactToMergeData, renderTemplate } from "../../shared/template";
+import type { Contact } from "../../shared/types";
 import { useAppData } from "../AppData";
 import { postJson } from "../api";
-import { ImportDialog } from "../components/ImportDialog";
+import { ImportDialog, type LoadedSendList } from "../components/ImportDialog";
 import {
   Badge,
   Button,
@@ -27,9 +29,35 @@ import {
 import { formatDate } from "../format";
 
 const MAX_BATCH_SIZE = 500;
+const VALID_RANKS = ["A", "B", "C", "D", "OUT"] as const;
+
+function toRecipientInput(contact: Contact) {
+  const rank = VALID_RANKS.includes(contact.rank as (typeof VALID_RANKS)[number])
+    ? contact.rank as (typeof VALID_RANKS)[number]
+    : "OUT";
+  return {
+    company: contact.company,
+    department: contact.department ?? "",
+    position: contact.position ?? "",
+    name: contact.name,
+    email: contact.email,
+    phone: contact.phone ?? "",
+    industry: contact.industry ?? "",
+    area: contact.area ?? "",
+    sales_rep: contact.sales_rep ?? "",
+    rank,
+    status: "",
+    issue: contact.issue ?? "",
+    service: contact.service ?? "",
+    note: contact.note ?? "",
+  };
+}
 
 export function BulkMailerPage() {
-  const { data, refresh, selectedContactIds, setSelectedContactIds } = useAppData();
+  const { data, refresh } = useAppData();
+  const [contacts, setContacts] = useState<Contact[]>([]);
+  const [selectedContactIds, setSelectedContactIds] = useState<Set<string>>(new Set());
+  const [loadedFileName, setLoadedFileName] = useState("");
   const [importOpen, setImportOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [templateId, setTemplateId] = useState("");
@@ -42,34 +70,16 @@ export function BulkMailerPage() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const bodyRef = useRef<HTMLTextAreaElement>(null);
-  const lastContactKey = useRef("");
 
   const blockedEmails = useMemo(
     () => new Set(data?.unsubscribes.map((item) => item.email.toLowerCase()) ?? []),
     [data],
   );
-  const contactKey = data?.contacts.map((contact) => contact.id).join("|") ?? "";
-
-  useEffect(() => {
-    if (!data || !contactKey || lastContactKey.current === contactKey) return;
-    lastContactKey.current = contactKey;
-    setSelectedContactIds(new Set(
-      data.contacts
-        .filter((contact) => !blockedEmails.has(contact.email.toLowerCase()))
-        .slice(0, MAX_BATCH_SIZE)
-        .map((contact) => contact.id),
-    ));
-  }, [blockedEmails, contactKey, data, setSelectedContactIds]);
-
-  useEffect(() => {
-    if (data?.user.email && !testRecipient) setTestRecipient(data.user.email);
-  }, [data?.user.email, testRecipient]);
-
-  const filteredContacts = (data?.contacts ?? []).filter((contact) =>
+  const filteredContacts = contacts.filter((contact) =>
     [contact.company, contact.name, contact.email]
       .some((value) => value.toLowerCase().includes(query.toLowerCase())),
   );
-  const selectedContacts = (data?.contacts ?? []).filter((contact) => selectedContactIds.has(contact.id));
+  const selectedContacts = contacts.filter((contact) => selectedContactIds.has(contact.id));
   const prepared = selectedContacts.map((contact) => {
     const merge = contactToMergeData(contact);
     const renderedSubject = renderTemplate(subject, merge);
@@ -85,6 +95,22 @@ export function BulkMailerPage() {
   const eligible = prepared.filter((mail) => !mail.blocked && mail.unresolved.length === 0);
   const firstPreview = eligible[0] ?? prepared[0];
   const estimatedMinutes = eligible.length > 1 ? Math.ceil(((eligible.length - 1) * interval) / 60) : 0;
+
+  const loadCurrentList = (list: LoadedSendList) => {
+    setContacts(list.contacts);
+    setLoadedFileName(list.fileName);
+    setSelectedContactIds(new Set(list.contacts.map((contact) => contact.id)));
+    setQuery("");
+    setMessage(list.contacts.length + "件を今回の送信リストにセットしました。");
+  };
+
+  const clearCurrentList = () => {
+    setContacts([]);
+    setLoadedFileName("");
+    setSelectedContactIds(new Set());
+    setQuery("");
+    setMessage("今回の送信リストをクリアしました。");
+  };
 
   const chooseTemplate = (id: string) => {
     setTemplateId(id);
@@ -131,7 +157,7 @@ export function BulkMailerPage() {
       const result = await postJson<{ queued: number }>("/api/campaigns", {
         name: new Date().toLocaleDateString("ja-JP") + " 一括メール送信",
         templateId: templateId || undefined,
-        contactIds: selectedContacts.map((contact) => contact.id),
+        recipients: selectedContacts.map(toRecipientInput),
         subject,
         body,
         cc: "",
@@ -141,7 +167,7 @@ export function BulkMailerPage() {
         confirmedCount: eligible.length,
       });
       setConfirmOpen(false);
-      setMessage(result.queued + "件を送信キューへ登録しました。");
+      setMessage(result.queued + "件を本番送信キューへ登録しました。");
       await refresh();
     } catch (cause) {
       setMessage(cause instanceof Error ? cause.message : "一括送信を開始できませんでした");
@@ -151,19 +177,16 @@ export function BulkMailerPage() {
   };
 
   const testSend = async () => {
-    if (!firstPreview || !testRecipient) return;
+    if (!firstPreview || !testRecipient || !data?.providerReady) return;
     setBusy(true);
+    setMessage("");
     try {
       await postJson("/api/mail/test-send", {
         to: testRecipient,
         subject: firstPreview.subject,
         body: firstPreview.body,
       });
-      setMessage(
-        data?.provider === "mock"
-          ? "テスト処理が完了しました。モックモードのため実メールは送信されません。"
-          : testRecipient + "へテスト送信しました。",
-      );
+      setMessage(testRecipient + "へGaroonからテスト送信しました。");
       await refresh();
     } catch (cause) {
       setMessage(cause instanceof Error ? cause.message : "テスト送信に失敗しました");
@@ -172,14 +195,14 @@ export function BulkMailerPage() {
     }
   };
 
-  const ready = eligible.length > 0 && Boolean(subject.trim()) && Boolean(body.trim());
-  const successMessage = message.includes("登録しました") || message.includes("完了しました") || message.includes("テスト送信しました");
+  const ready = Boolean(data?.providerReady) && eligible.length > 0 && Boolean(subject.trim()) && Boolean(body.trim());
+  const successMessage = message.includes("セットしました") || message.includes("登録しました") || message.includes("テスト送信しました");
 
   return (
     <>
       <PageHeader
-        title="一括メール送信"
-        description="リストを読み込み、メールを作成し、宛先ごとに1通ずつ送信します。"
+        title="今回のリストへ一括メール送信"
+        description="毎回Excel / CSVを読み込み、宛先を確認してGaroonから1通ずつ送信します。リストは顧客台帳として保存しません。"
         action={(
           <div className="flex flex-wrap gap-2">
             <a
@@ -191,7 +214,7 @@ export function BulkMailerPage() {
             </a>
             <Button onClick={() => setImportOpen(true)}>
               <FileSpreadsheet className="size-4" />
-              リストを読み込む
+              今回のリストを読み込む
             </Button>
           </div>
         )}
@@ -199,9 +222,9 @@ export function BulkMailerPage() {
 
       <div className="mb-6 grid gap-3 sm:grid-cols-3">
         {[
-          ["1", "リストを読み込む", "Excel / CSV"],
-          ["2", "メールを作る", "件名・本文"],
-          ["3", "確認して送る", "最大500件"],
+          ["1", "毎回リストを読む", "端末内で解析"],
+          ["2", "メールを作る", "差し込み・確認"],
+          ["3", "Garoonから送る", "最大500件"],
         ].map(([number, title, detail]) => (
           <div key={number} className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
             <span className="grid size-9 place-items-center rounded-full bg-blue-700 text-sm font-bold text-white">{number}</span>
@@ -212,9 +235,14 @@ export function BulkMailerPage() {
 
       <div className="mb-6">
         {data?.provider === "mock" ? (
-          <Notice tone="warning"><strong>現在はテストモードです。</strong> 実メールは送信されません。Garoon設定後に実送信へ切り替わります。</Notice>
+          <Notice tone="warning"><strong>ローカルテスト送信です。</strong> 本番環境ではモック送信を禁止しています。</Notice>
+        ) : data?.providerReady ? (
+          <Notice tone="success"><strong>{data.providerLabel}の準備が完了しています。</strong> 配信停止先と差し込み内容を確認してから送信してください。</Notice>
         ) : (
-          <Notice tone="success"><strong>Garoon実送信モードです。</strong> 配信停止と差し込み内容を再確認してからQueueへ登録します。</Notice>
+          <Notice tone="danger">
+            <strong>本番仕様ですがGaroon接続情報が未登録のため、送信を安全に停止しています。</strong>
+            {data?.missingProviderConfig.length ? " 必要な設定: " + data.missingProviderConfig.join("、") : ""}
+          </Notice>
         )}
       </div>
 
@@ -223,19 +251,31 @@ export function BulkMailerPage() {
           <div className="border-b border-slate-200 p-4">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <div className="flex items-center gap-2"><Users className="size-5 text-blue-700" /><h2 className="font-bold">宛先リスト</h2></div>
-                <p className="mt-1 text-xs text-slate-500">{selectedContactIds.size}件を選択中</p>
+                <div className="flex items-center gap-2"><Users className="size-5 text-blue-700" /><h2 className="font-bold">今回の宛先</h2></div>
+                <p className="mt-1 max-w-56 truncate text-xs text-slate-500">
+                  {loadedFileName ? loadedFileName + "・" + selectedContactIds.size + "件選択" : "ファイルを読み込んでください"}
+                </p>
               </div>
-              <div className="flex gap-2 text-xs font-semibold">
-                <button type="button" onClick={selectVisible} className="text-blue-700">全件選択</button>
-                <button type="button" onClick={() => setSelectedContactIds(new Set())} className="text-slate-500">解除</button>
-              </div>
+              {contacts.length > 0 && (
+                <button type="button" onClick={clearCurrentList} className="rounded-md p-2 text-slate-500 hover:bg-slate-100" title="今回のリストをクリア">
+                  <Trash2 className="size-4" />
+                </button>
+              )}
             </div>
-            <div className="relative mt-3">
-              <Search className="absolute left-3 top-2.5 size-4 text-slate-400" />
-              <input className={inputClass + " pl-9"} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="会社名・氏名・メール" />
-            </div>
+            {contacts.length > 0 && (
+              <>
+                <div className="mt-3 flex gap-3 text-xs font-semibold">
+                  <button type="button" onClick={selectVisible} className="text-blue-700">表示中を選択</button>
+                  <button type="button" onClick={() => setSelectedContactIds(new Set())} className="text-slate-500">選択解除</button>
+                </div>
+                <div className="relative mt-3">
+                  <Search className="absolute left-3 top-2.5 size-4 text-slate-400" />
+                  <input className={inputClass + " pl-9"} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="会社名・氏名・メール" />
+                </div>
+              </>
+            )}
           </div>
+
           {filteredContacts.length ? (
             <div className="max-h-[640px] divide-y divide-slate-100 overflow-y-auto">
               {filteredContacts.map((contact) => {
@@ -255,8 +295,9 @@ export function BulkMailerPage() {
           ) : (
             <div className="p-8 text-center">
               <FileSpreadsheet className="mx-auto size-9 text-slate-300" />
-              <p className="mt-3 text-sm font-semibold">宛先リストがありません</p>
-              <Button className="mt-4" onClick={() => setImportOpen(true)}>リストを読み込む</Button>
+              <p className="mt-3 text-sm font-semibold">今回の宛先は未読込です</p>
+              <p className="mt-1 text-xs text-slate-500">前回のリストは自動表示しません</p>
+              <Button className="mt-4" onClick={() => setImportOpen(true)}>ファイルを読み込む</Button>
             </div>
           )}
         </Card>
@@ -276,6 +317,7 @@ export function BulkMailerPage() {
                 </select>
               </Field>
             </div>
+
             <div className="space-y-5 p-5 sm:p-6">
               <Field label="件名" required>
                 <input className={inputClass} value={subject} onChange={(event) => setSubject(event.target.value)} placeholder="{{company}}様｜ご案内" />
@@ -300,48 +342,85 @@ export function BulkMailerPage() {
                 </div>
               )}
             </div>
+
             <div className="flex flex-col gap-3 border-t border-slate-200 bg-slate-50 p-4 lg:flex-row lg:items-center lg:justify-between">
               <div className="text-sm">
                 <strong>送信可能 {eligible.length}件</strong>
                 {prepared.length > eligible.length && <span className="ml-3 text-red-700">除外 {prepared.length - eligible.length}件</span>}
               </div>
               <div className="flex flex-wrap gap-2">
-                <input type="email" className={inputClass + " w-56"} value={testRecipient} onChange={(event) => setTestRecipient(event.target.value)} placeholder="テスト送信先" />
-                <Button variant="secondary" busy={busy} disabled={!firstPreview || !testRecipient} onClick={() => void testSend()}><FlaskConical className="size-4" />テスト</Button>
-                <Button variant="danger" disabled={!ready} onClick={() => { setConsentConfirmed(false); setConfirmOpen(true); }}><Send className="size-4" />{eligible.length}件を送信</Button>
+                <input type="email" className={inputClass + " w-56"} value={testRecipient} onChange={(event) => setTestRecipient(event.target.value)} placeholder="自分宛テスト送信先" />
+                <Button variant="secondary" busy={busy} disabled={!firstPreview || !testRecipient || !data?.providerReady} onClick={() => void testSend()}>
+                  <FlaskConical className="size-4" />自分宛テスト
+                </Button>
+                <Button variant="danger" disabled={!ready} onClick={() => { setConsentConfirmed(false); setConfirmOpen(true); }}>
+                  <Send className="size-4" />{data?.providerReady ? eligible.length + "件を本番送信" : "接続設定待ち"}
+                </Button>
               </div>
             </div>
           </Card>
 
-          {message && <Notice tone={successMessage ? "success" : "danger"}>{message}</Notice>}
+          {message && <Notice tone={successMessage ? "success" : message.includes("クリア") ? "info" : "danger"}>{message}</Notice>}
 
           <Card>
-            <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4"><div><h2 className="font-bold">最近の送信</h2><p className="text-xs text-slate-500">直近8件</p></div><MailCheck className="size-5 text-slate-400" /></div>
+            <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+              <div><h2 className="font-bold">最近の送信結果</h2><p className="text-xs text-slate-500">送信履歴だけを保持します</p></div>
+              <MailCheck className="size-5 text-slate-400" />
+            </div>
             {data?.campaigns.length ? (
-              <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="bg-slate-50 text-xs text-slate-500"><tr><th className="px-5 py-3">日時</th><th className="px-4 py-3">対象</th><th className="px-4 py-3">成功</th><th className="px-4 py-3">失敗</th><th className="px-5 py-3">状態</th></tr></thead><tbody className="divide-y divide-slate-100">{data.campaigns.slice(0, 8).map((campaign) => <tr key={campaign.id}><td className="px-5 py-4">{formatDate(campaign.created_at, true)}</td><td className="px-4 py-4">{campaign.target_count}</td><td className="px-4 py-4 text-emerald-700">{campaign.sent_count}</td><td className="px-4 py-4 text-red-700">{campaign.failed_count}</td><td className="px-5 py-4"><Badge tone={statusTone(campaign.status)}>{campaign.status}</Badge></td></tr>)}</tbody></table></div>
-            ) : <div className="p-8 text-center text-sm text-slate-500">送信履歴はまだありません</div>}
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead className="bg-slate-50 text-xs text-slate-500"><tr><th className="px-5 py-3">日時</th><th className="px-4 py-3">対象</th><th className="px-4 py-3">成功</th><th className="px-4 py-3">失敗</th><th className="px-5 py-3">状態</th></tr></thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {data.campaigns.slice(0, 8).map((campaign) => (
+                      <tr key={campaign.id}>
+                        <td className="px-5 py-4">{formatDate(campaign.created_at, true)}</td>
+                        <td className="px-4 py-4">{campaign.target_count}</td>
+                        <td className="px-4 py-4 text-emerald-700">{campaign.sent_count}</td>
+                        <td className="px-4 py-4 text-red-700">{campaign.failed_count}</td>
+                        <td className="px-5 py-4"><Badge tone={statusTone(campaign.status)}>{campaign.status}</Badge></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="p-8 text-center text-sm text-slate-500">送信履歴はまだありません</div>
+            )}
           </Card>
         </div>
       </div>
 
       {confirmOpen && (
         <Modal
-          title="一括送信の最終確認"
+          title="Garoon本番送信の最終確認"
           description={eligible.length + "件を個別メールとして送信します。所要時間の目安は約" + estimatedMinutes + "分です。"}
           onClose={() => setConfirmOpen(false)}
-          footer={<><Button variant="secondary" onClick={() => setConfirmOpen(false)}>戻る</Button><Button variant="danger" busy={busy} disabled={!consentConfirmed} onClick={() => void executeCampaign()}><Send className="size-4" />送信を開始</Button></>}
+          footer={(
+            <>
+              <Button variant="secondary" onClick={() => setConfirmOpen(false)}>戻る</Button>
+              <Button variant="danger" busy={busy} disabled={!consentConfirmed || !data?.providerReady} onClick={() => void executeCampaign()}>
+                <Send className="size-4" />送信を開始
+              </Button>
+            </>
+          )}
         >
           <div className="space-y-4">
-            <Notice tone="warning">送信後は取り消せません。宛先・件名・本文を確認してください。</Notice>
+            <Notice tone="warning">送信後は取り消せません。今回読み込んだ宛先・件名・本文を確認してください。</Notice>
+            <div className="rounded-lg border border-slate-200 p-4 text-sm">
+              <div><strong>送信元:</strong> {data?.providerLabel}</div>
+              <div className="mt-1"><strong>ファイル:</strong> {loadedFileName}</div>
+              <div className="mt-1"><strong>送信件数:</strong> {eligible.length}件</div>
+            </div>
             <label className="flex cursor-pointer gap-3 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-950">
               <input type="checkbox" checked={consentConfirmed} onChange={(event) => setConsentConfirmed(event.target.checked)} className="mt-1" />
-              <span><strong>送信対象者から必要な同意を得ています。</strong><br />配信停止先・購入リスト・無差別送信ではありません。</span>
+              <span><strong>今回の全宛先について、送信の正当性と配信許諾を確認しました。</strong><br />購入リスト・無差別送信・配信停止先ではありません。</span>
             </label>
           </div>
         </Modal>
       )}
 
-      {importOpen && <ImportDialog onClose={() => setImportOpen(false)} />}
+      {importOpen && <ImportDialog onClose={() => setImportOpen(false)} onImport={loadCurrentList} />}
     </>
   );
 }

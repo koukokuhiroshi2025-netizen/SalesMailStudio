@@ -4,22 +4,22 @@
 
 - Cloudflare Workers: https://sales-mail-studio-production.sales-mail-studio.workers.dev
 - GitHub: https://github.com/koukokuhiroshi2025-netizen/SalesMailStudio
-- 初回公開は誤送信防止のため `MAIL_PROVIDER=mock` です。Garoon Secretsの登録と接続確認後に `garoon` へ切り替えてください。
-- ログインフォームやユーザー登録はありません。Cloudflare Secretの`ACCESS_TOKEN`を含む管理者専用URLから自動認証します。
+- production環境は`MAIL_PROVIDER=garoon`の本番仕様です。Garoon Secretsが不足している場合はモックへフォールバックせず、送信を安全に停止します。
+- ログインフォームやユーザー登録はありません。Cloudflare Secretの`ACCESS_TOKEN`を含む利用者専用URLから自動認証します。
 
-Excel / CSVの送信リストを取り込み、件名と本文を作成し、Garoonから宛先ごとに個別送信するシンプルな一括メール送信Webアプリです。Cloudflare Workers、D1、Queues、Static Assetsを使い、外部の有料メール配信サービスを必須にしないMVPとして構成しています。
+Excel / CSVの送信リストをその都度読み込み、件名と本文を作成し、Garoonから宛先ごとに個別送信するシンプルな一括メール送信Webアプリです。読み込んだリストは顧客台帳として保存せず、次のファイルで置き換えます。Cloudflare Workers、D1、Queues、Static Assetsを使い、外部の有料メール配信サービスを必須にしないMVPとして構成しています。
 
 > 重要: 本アプリは、正当な取引関係や適切な同意に基づく営業活動のためのものです。購入リストへの無差別配信、配信停止先への送信、フィッシング、なりすまし、違法な勧誘には使用しないでください。
 
 ## 実装済み機能
 
-- リスト取込・メール作成・確認・一括送信を1画面に集約した日本語レスポンシブUI
-- ログイン入力なし。Secret付き管理者専用URLでHttpOnlyセッションを自動発行
+- 毎回のリスト読込・メール作成・確認・一括送信を1画面に集約した日本語レスポンシブUI
+- ログイン入力なし。Secret付き利用者専用URLでHttpOnlyセッションを自動発行
 - `.xlsx` / `.xls` / `.csv` のブラウザ内解析（最大10MB、UTF-8 / Shift_JIS CSV）
 - Excel列とアプリ項目の自動・手動マッピング
 - 必須項目、メール形式、メール重複、同一企業、配信停止、過去送信、数式インジェクションの検査
 - 顧客13項目の差し込み、未展開変数の検知、顧客ごとのプレビュー、ランダム3件確認
-- 500件を上限とする一括処理、確認件数の一致チェック、5/10/30/60秒の送信間隔
+- 500件を上限とする今回限りの送信リスト、確認件数の一致チェック、5/10/30/60秒の送信間隔
 - モック送信、自分宛テスト、Garoon `MailSendMails`、`MailSaveDraftMails`
 - Cloudflare Queueによる1宛先ずつの個別非同期処理
 - 送信・下書き・失敗ログ、キャンペーン進捗、フォロー期限、簡易案件管理
@@ -37,11 +37,11 @@ Browser (React / Tailwind)
        ↓
 Cloudflare Worker
   ├─ 認証・権限・入力検証・レート制限
-  ├─ D1: 営業先、テンプレート、履歴、CRMデータ
+  ├─ D1: テンプレート、配信停止、送信履歴（読込リストは保存しない）
   └─ Queue: 1メッセージ = 1宛先
        ↓
 MailProvider
-  ├─ MockProvider（ローカル。外部送信なし）
+  ├─ MockProvider（ローカル開発限定。productionでは使用禁止）
   └─ GaroonProvider（SOAP API）
 ```
 
@@ -116,7 +116,7 @@ npm run dev
 
 ブラウザで `http://localhost:5173` を開きます。
 
-ローカル管理者URL:
+ローカル利用者URL:
 
 - `http://localhost:5173/?access=local-access-token-change-me-32chars`
 
@@ -190,7 +190,7 @@ npx wrangler secret put GAROON_BASIC_USERNAME --env production
 npx wrangler secret put GAROON_BASIC_PASSWORD --env production
 ```
 
-`SESSION_SECRET`と`ACCESS_TOKEN`はそれぞれ最低32文字の独立したランダム値にしてください。`ACCESS_TOKEN`はGitやREADMEへ記載せず、管理者専用URLとして安全に共有します。`DEMO_USER_EMAIL`は運用管理者のメールへ変更します。
+`SESSION_SECRET`と`ACCESS_TOKEN`はそれぞれ最低32文字の独立したランダム値にしてください。`ACCESS_TOKEN`はGitやREADMEへ記載せず、利用者専用URLとして安全に共有します。`DEMO_USER_EMAIL`は運用管理者のメールへ変更します。
 
 ### 6. 本番DBへmigration
 
@@ -221,7 +221,7 @@ npm run deploy
 - 利用するメールアカウントID
 - 必要な場合のみBasic認証情報
 
-画面の「メールアカウント」では接続テストを行えます。フォームへ入力した認証情報はWorkerへのそのリクエストだけに使用し、ブラウザのlocalStorageやD1には保存しません。継続的な送信処理はCloudflare Secretsに登録した値を使用します。
+継続的な本番送信はCloudflare Secretsに登録した接続値だけを使用します。値が不足している場合、画面とAPIの両方で送信を停止します。認証情報をブラウザのlocalStorageやD1へ保存しません。
 
 実装仕様:
 
@@ -250,7 +250,7 @@ npm run deploy
 |---|---|
 | `users` | 利用者・テナント境界 |
 | `mail_accounts` | プロバイダーの非機密メタデータ |
-| `contacts` | 営業先 |
+| `contacts` | 旧MVP互換データ（新しい一時リスト運用では追加・表示しない） |
 | `custom_fields` | カスタム項目定義 |
 | `contact_custom_values` | カスタム値 |
 | `templates` | 件名・本文・署名テンプレート |
@@ -272,7 +272,7 @@ npm run deploy
 - サーバー入力はZodでサイズと型を制限
 - Garoon URLはHTTPSの`*.cybozu.com`だけを許可し、SSRFを抑止
 - 認証情報はCloudflare Secrets。D1、localStorage、ログへ保存しない
-- 一括送信は初期100件上限。対象件数の再確認と未展開変数のブロックあり
+- 一括送信は500件上限。対象件数の再確認と未展開変数のブロックあり
 - Queueは1宛先ずつ処理し、失敗時は二重送信を避けるため自動再送を閉じる
 - 配信停止をUIとWorkerの双方で照合
 - Excelセルの先頭`= + - @`を文字列化
@@ -298,11 +298,11 @@ npm run deploy
 
 同期フォルダー上のロック問題が考えられます。`SALES_MAIL_STUDIO_STATE_PATH`をローカルディスクへ設定し、migrationとdevを同じシェルで再実行してください。
 
-### 管理者専用URLから開けない
+### 利用者専用URLから開けない
 
 - URLに`?access=<ACCESS_TOKEN>`が含まれているか確認
 - 本番の`ACCESS_TOKEN` production Secretを再確認
-- トークン変更後は新しい管理者専用URLから開き直す
+- トークン変更後は新しい利用者専用URLから開き直す
 
 ### D1テーブルがない
 
@@ -343,7 +343,7 @@ producerとconsumerの両方が参照する` sales-mail-studio-mail `とDLQを�
 - [ ] すべてのproduction Secretsを登録
 - [ ] `.dev.vars`や実認証情報が配布物・Gitにない
 - [ ] `npm audit`、`npm test`、`npm run build`、`npm run deploy:dry`が成功
-- [ ] Garoonの接続テストと自分宛テストが成功
+- [ ] Garoon Secrets登録後に接続確認と自分宛テストが成功
 - [ ] 1件の下書き保存で件名・本文・宛先を目視確認
 - [ ] 除外リストと送信上限を確認
 - [ ] 組織のメール送信・個人情報・ログ保持方針を確認

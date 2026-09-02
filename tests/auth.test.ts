@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { authenticateAccessToken, createSessionCookie } from "../worker/auth";
 
-describe("administrator access link", () => {
+describe("user access link", () => {
   const env = {
     ENVIRONMENT: "production",
     ACCESS_TOKEN: "a-secure-access-token-with-more-than-32-characters",
@@ -9,10 +9,10 @@ describe("administrator access link", () => {
     DEMO_USER_EMAIL: "admin@example.com",
   };
 
-  it("creates a long-lived administrator session for the valid token", async () => {
+  it("creates a long-lived user session for the valid token", async () => {
     const user = await authenticateAccessToken(env.ACCESS_TOKEN, env);
     expect(user?.email).toBe("admin@example.com");
-    expect(user?.displayName).toBe("メール送信管理者");
+    expect(user?.displayName).toBe("メール送信利用者");
     const cookie = await createSessionCookie(user!, env);
     expect(cookie).toContain("HttpOnly");
     expect(cookie).toContain("SameSite=Strict");

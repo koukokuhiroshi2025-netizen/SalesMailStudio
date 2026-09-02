@@ -63,7 +63,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
           if (!active) return;
           setAuthenticated(false);
           setData(null);
-          setError(cause instanceof Error ? cause.message : "管理者専用URLが無効です");
+          setError(cause instanceof Error ? cause.message : "利用者専用URLが無効です");
           setLoading(false);
           return;
         }

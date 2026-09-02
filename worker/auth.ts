@@ -37,7 +37,7 @@ function createUser(email: string, lifetimeSeconds: number): SessionUser {
   return {
     id: "demo-user",
     email,
-    displayName: "メール送信管理者",
+    displayName: "メール送信利用者",
     exp: Math.floor(Date.now() / 1000) + lifetimeSeconds,
   };
 }

@@ -142,6 +142,9 @@ export interface BootstrapData {
   settings: Record<string, string>;
   stats: DashboardStats;
   provider: string;
+  providerReady: boolean;
+  providerLabel: string;
+  missingProviderConfig: string[];
 }
 
 export interface ApiErrorPayload {

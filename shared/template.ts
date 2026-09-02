@@ -39,7 +39,7 @@ export function renderTemplate(value: string, data: MergeData) {
   return { content, unresolved: [...unresolved] };
 }
 
-export function contactToMergeData(contact: Contact): MergeData {
+export function contactToMergeData(contact: Pick<Contact, MergeField>): MergeData {
   return {
     company: contact.company,
     department: contact.department,

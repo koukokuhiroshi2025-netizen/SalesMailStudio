@@ -50,7 +50,7 @@
       "name": "sales-mail-studio-production",
       "vars": {
         "ENVIRONMENT": "production",
-        "MAIL_PROVIDER": "mock"
+        "MAIL_PROVIDER": "garoon"
       },
       "ratelimits": [
         {
